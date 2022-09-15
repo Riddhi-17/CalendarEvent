@@ -1,0 +1,950 @@
+import 'package:collection/collection.dart';
+import 'package:device_calendar/device_calendar.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
+import 'package:timezone/timezone.dart';
+import 'package:flutter_native_timezone/flutter_native_timezone.dart';
+
+import '../date_time_picker.dart';
+import '../event_reminders.dart';
+import '../recurring_event_dialog.dart';
+
+enum RecurrenceRuleEndType {
+  Indefinite,
+  MaxOccurrences,
+  SpecifiedEndDate,
+}
+enum RecurrenceRuleEndType2 {
+  Indefinite,
+  MaxOccurrences,
+}
+
+class DoctorAddAppoinment extends StatefulWidget {
+  const DoctorAddAppoinment({Key? key}) : super(key: key);
+
+  @override
+  _DoctorAddAppoinmentState createState() {
+    return _DoctorAddAppoinmentState();
+  }
+}
+
+class _DoctorAddAppoinmentState extends State<DoctorAddAppoinment> {
+  final GlobalKey<FormState> _formKey = GlobalKey<FormState>();
+  final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
+  final Calendar? calendar;
+
+  Event? _event;
+  late DeviceCalendarPlugin _deviceCalendarPlugin;
+  RecurringEventDialog? _recurringEventDialog;
+
+  TZDateTime? _startDate;
+  TimeOfDay? _startTime;
+  TZDateTime? _endDate;
+  TimeOfDay? _endTime;
+  DayOfWeekGroup? _dayOfWeekGroup = DayOfWeekGroup.None;
+
+  bool _isRecurringEvent = false;
+  bool _isByDayOfMonth = false;
+  RecurrenceRuleEndType? _recurrenceRuleEndType;
+  RecurrenceRuleEndType2? _recurrenceRuleEndType2;
+  int? _totalOccurrences;
+  int? _interval;
+  late DateTime _recurrenceEndDate;
+  RecurrenceFrequency? _recurrenceFrequency = RecurrenceFrequency.Daily;
+  List<DayOfWeek> _daysOfWeek = [];
+  int? _dayOfMonth;
+  final List<int> _validDaysOfMonth = <int>[];
+  late MonthOfYear? _monthOfYear;
+  WeekNumber? _weekOfMonth;
+  DayOfWeek? _selectedDayOfWeek = DayOfWeek.Monday;
+  String _timezone = 'Etc/UTC';
+
+  List<Attendee> _attendees = [];
+  List<Reminder> _reminders = [];
+
+  _DoctorAddAppoinmentState({this.calendar}) {
+    getCurrentLocation();
+  }
+
+  void getCurrentLocation() async {
+    try {
+      _timezone = await FlutterNativeTimezone.getLocalTimezone();
+    } catch (e) {
+      if (kDebugMode) {
+        print('Could not get the local timezone');
+      }
+    }
+
+    _deviceCalendarPlugin = DeviceCalendarPlugin();
+
+    _recurringEventDialog = _recurringEventDialog;
+
+    _attendees = <Attendee>[];
+    _reminders = <Reminder>[];
+    _recurrenceRuleEndType = RecurrenceRuleEndType.Indefinite;
+
+    if (_event == null) {
+      if (kDebugMode) {
+        print('calendar_event _timezone ------------------------- $_timezone');
+      }
+      var currentLocation = timeZoneDatabase.locations[_timezone];
+      if (currentLocation != null) {
+        _startDate = TZDateTime.now(currentLocation);
+        _endDate = TZDateTime.now(currentLocation).add(const Duration(hours: 1));
+      } else {
+        var fallbackLocation = timeZoneDatabase.locations['Etc/UTC'];
+        _startDate = TZDateTime.now(fallbackLocation!);
+        _endDate = TZDateTime.now(fallbackLocation).add(const Duration(hours: 1));
+      }
+      _event = Event(calendar?.id, start: _startDate, end: _endDate);
+
+
+      _recurrenceEndDate = _endDate as DateTime;
+      _dayOfMonth = 1;
+      _monthOfYear = MonthOfYear.January;
+      _weekOfMonth = WeekNumber.First;
+    } else {
+      _startDate = _event!.start!;
+      _endDate = _event!.end!;
+      _isRecurringEvent = _event!.recurrenceRule != null;
+
+      if (_event!.attendees!.isNotEmpty) {
+        _attendees.addAll(_event!.attendees! as Iterable<Attendee>);
+      }
+
+      if (_event!.reminders!.isNotEmpty) {
+        _reminders.addAll(_event!.reminders!);
+      }
+
+      if (_isRecurringEvent) {
+        _interval = _event!.recurrenceRule!.interval;
+        _totalOccurrences = _event!.recurrenceRule!.totalOccurrences;
+        _recurrenceFrequency = _event!.recurrenceRule!.recurrenceFrequency!;
+
+        if (_totalOccurrences != null) {
+          _recurrenceRuleEndType = RecurrenceRuleEndType.MaxOccurrences;
+        }
+
+        if (_event!.recurrenceRule!.endDate != null) {
+          _recurrenceRuleEndType = RecurrenceRuleEndType.SpecifiedEndDate;
+          _recurrenceEndDate = _event!.recurrenceRule!.endDate!;
+        }
+
+        _isByDayOfMonth = _event?.recurrenceRule?.weekOfMonth == null;
+        _daysOfWeek = _event?.recurrenceRule?.daysOfWeek ?? <DayOfWeek>[];
+        _monthOfYear =
+            _event?.recurrenceRule?.monthOfYear ?? MonthOfYear.January;
+        _weekOfMonth = _event?.recurrenceRule?.weekOfMonth ?? WeekNumber.First;
+        _selectedDayOfWeek =
+        _daysOfWeek.isNotEmpty ? _daysOfWeek.first : DayOfWeek.Monday;
+        _dayOfMonth = _event?.recurrenceRule?.dayOfMonth ?? 1;
+
+        if (_daysOfWeek.isNotEmpty) {
+          _updateDaysOfWeekGroup();
+        }
+      }
+    }
+
+    _startTime = TimeOfDay(hour: _startDate!.hour, minute: _startDate!.minute);
+    _endTime = TimeOfDay(hour: _endDate!.hour, minute: _endDate!.minute);
+
+    // Getting days of the current month (or a selected month for the yearly recurrence) as a default
+    _getValidDaysOfMonth(_recurrenceFrequency);
+    setState(() {});
+  }
+
+  //todo: delete this function
+  void printAttendeeDetails(Attendee attendee) {}
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+        key: _scaffoldKey,
+        appBar: AppBar(
+          title: Text(_event?.eventId?.isEmpty ?? true
+              ? 'Add Appointment'
+              : calendar?.isReadOnly == true
+              ? 'View Appointment ${_event?.title}'
+              : 'Edit Appointment ${_event?.title}'),
+        ),
+        body: SingleChildScrollView(
+          child: AbsorbPointer(
+            absorbing: calendar?.isReadOnly ?? false,
+            child: Column(
+              children: [
+                Form(
+                  autovalidateMode: AutovalidateMode.onUserInteraction,
+                  key: _formKey,
+                  child: Column(
+                    children: [
+                      getEventTitle(),
+                      getDoctorName(),
+                      eventStartTime(),
+                      if (_event?.allDay == false) ...[
+                        Padding(
+                          padding: const EdgeInsets.all(10.0),
+                          child: DateTimePicker(
+                            labelText: 'To',
+                            selectedDate: _endDate,
+                            selectedTime: _endTime,
+                            enableTime: _event?.allDay == false,
+                            selectDate: (DateTime date) {
+                              setState(
+                                      () {
+                                    var currentLocation =
+                                    timeZoneDatabase.locations[_timezone];
+                                    if (currentLocation != null) {
+                                      _endDate =
+                                          TZDateTime.from(
+                                              date, currentLocation);
+                                      _event?.end =
+                                          _combineDateWithTime(
+                                              _endDate, _endTime);
+                                    }
+                                  }
+                              );
+                            },
+                            selectTime: (TimeOfDay time) {
+                              setState(
+                                    () {
+                                  _endTime = time;
+                                  _event?.end =
+                                      _combineDateWithTime(
+                                          _endDate, _endTime);
+                                },
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                      GestureDetector(
+                        onTap: () async {
+                          var result = await Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                  builder: (context) =>
+                                      const EventRemindersPage()));
+                          if (result == null) {
+                            return;
+                          }
+                          _reminders = result;
+                        },
+                        child: Padding(
+                          padding: const EdgeInsets.all(10.0),
+                          child: Align(
+                            alignment: Alignment.centerLeft,
+                            child: Wrap(
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              spacing: 10.0,
+                              children: [
+                                const Icon(Icons.alarm),
+                                if (_reminders.isEmpty)
+                                  Text(calendar?.isReadOnly == false
+                                      ? 'Add reminders'
+                                      : 'Reminders'),
+                                for (var reminder in _reminders)
+                                  Text('${reminder.minutes} minutes before; ')
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                      CheckboxListTile(
+                        value: _isRecurringEvent,
+                        title: const Text('Is recurring'),
+                        onChanged: (isChecked) {
+                          setState(() {
+                            _isRecurringEvent = isChecked ?? false;
+                          });
+                        },
+                      ),
+                      if (_isRecurringEvent) ...[
+                        ListTile(
+                          leading: const Text('Select a Recurrence Type'),
+                          trailing: DropdownButton<RecurrenceFrequency>(
+                            onChanged: (selectedFrequency) {
+                              setState(() {
+                                _recurrenceFrequency = selectedFrequency;
+                                _getValidDaysOfMonth(_recurrenceFrequency);
+                              });
+                            },
+                            value: _recurrenceFrequency,
+                            items: RecurrenceFrequency.values
+                                .map((frequency) =>
+                                DropdownMenuItem(
+                                  value: frequency,
+                                  child:
+                                  _recurrenceFrequencyToText(frequency),
+                                ))
+                                .toList(),
+                          ),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.fromLTRB(15, 0, 15, 10),
+                          child: Row(
+                            children: <Widget>[
+                              const Text('Repeat Every '),
+                              Flexible(
+                                child: TextFormField(
+                                  initialValue: _interval?.toString() ?? '1',
+                                  decoration: const InputDecoration(
+                                    hintText: '1',
+                                    border: OutlineInputBorder(),
+                                  ),
+                                  keyboardType: TextInputType.number,
+                                  inputFormatters: [
+                                    FilteringTextInputFormatter.digitsOnly,
+                                    LengthLimitingTextInputFormatter(2)
+                                  ],
+                                  validator: _validateInterval,
+                                  textAlign: TextAlign.right,
+                                  onSaved: (String? value) {
+                                    if (value != null) {
+                                      _interval = int.tryParse(value);
+                                    }
+                                  },
+                                ),
+                              ),
+                              _recurrenceFrequencyToIntervalText(
+                                  _recurrenceFrequency),
+                            ],
+                          ),
+                        ),
+                        if (_recurrenceFrequency ==
+                            RecurrenceFrequency.Weekly) ...[
+                          Column(
+                            children: [
+                              ...DayOfWeek.values.map((day) {
+                                return CheckboxListTile(
+                                  title: Text(day.enumToString),
+                                  value:
+                                  _daysOfWeek.any((dow) => dow == day),
+                                  onChanged: (selected) {
+                                    setState(() {
+                                      if (selected == null) {
+                                        _daysOfWeek.add(day);
+                                      } else {
+                                        _daysOfWeek.remove(day);
+                                      }
+                                      _updateDaysOfWeekGroup(selectedDay: day);
+                                    });
+                                  },
+                                );
+                              }),
+                              const Divider(color: Colors.black),
+                              ...DayOfWeekGroup.values.map((group) {
+                                return RadioListTile(
+                                    title: Text(group.enumToString),
+                                    value: group,
+                                    groupValue: _dayOfWeekGroup,
+                                    onChanged: (selected) {
+                                      setState(() {
+                                        _dayOfWeekGroup =
+                                        selected as DayOfWeekGroup;
+                                        _updateDaysOfWeek();
+                                      });
+                                    },
+                                    controlAffinity:
+                                    ListTileControlAffinity.trailing);
+                              }),
+                            ],
+                          )
+                        ],
+                        if (_recurrenceFrequency ==
+                            RecurrenceFrequency.Monthly ||
+                            _recurrenceFrequency ==
+                                RecurrenceFrequency.Yearly) ...[
+                          SwitchListTile(
+                            value: _isByDayOfMonth,
+                            onChanged: (value) =>
+                                setState(() => _isByDayOfMonth = value),
+                            title: const Text('By day of the month'),
+                          )
+                        ],
+                        if (_recurrenceFrequency ==
+                            RecurrenceFrequency.Yearly &&
+                            _isByDayOfMonth) ...[
+                          ListTile(
+                            leading: const Text('Month of the year'),
+                            trailing: DropdownButton<MonthOfYear>(
+                              onChanged: (value) {
+                                setState(() {
+                                  _monthOfYear = value;
+                                  _getValidDaysOfMonth(_recurrenceFrequency);
+                                });
+                              },
+                              value: _monthOfYear,
+                              items: MonthOfYear.values
+                                  .map((month) =>
+                                  DropdownMenuItem(
+                                    value: month,
+                                    child: Text(month.enumToString),
+                                  ))
+                                  .toList(),
+                            ),
+                          ),
+                        ],
+                        if (_isByDayOfMonth &&
+                            (_recurrenceFrequency ==
+                                RecurrenceFrequency.Monthly ||
+                                _recurrenceFrequency ==
+                                    RecurrenceFrequency.Yearly)) ...[
+                          ListTile(
+                            leading: const Text('Day of the month'),
+                            trailing: DropdownButton<int>(
+                              onChanged: (value) {
+                                setState(() {
+                                  _dayOfMonth = value;
+                                });
+                              },
+                              value: _dayOfMonth,
+                              items: _validDaysOfMonth
+                                  .map((day) =>
+                                  DropdownMenuItem(
+                                    value: day,
+                                    child: Text(day.toString()),
+                                  ))
+                                  .toList(),
+                            ),
+                          ),
+                        ],
+                        if (!_isByDayOfMonth &&
+                            (_recurrenceFrequency ==
+                                RecurrenceFrequency.Monthly ||
+                                _recurrenceFrequency ==
+                                    RecurrenceFrequency.Yearly)) ...[
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(15, 10, 15, 10),
+                            child: Align(
+                                alignment: Alignment.centerLeft,
+                                child: _recurrenceFrequencyToText(
+                                    _recurrenceFrequency)
+                                    .data !=
+                                    null
+                                    ? Text(_recurrenceFrequencyToText(
+                                    _recurrenceFrequency)
+                                    .data! +
+                                    ' on the ')
+                                    : const Text('')),
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(0, 0, 0, 10),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: <Widget>[
+                                Flexible(
+                                  child: DropdownButton<WeekNumber>(
+                                    onChanged: (value) {
+                                      setState(() {
+                                        _weekOfMonth = value;
+                                      });
+                                    },
+                                    value: _weekOfMonth ?? WeekNumber.First,
+                                    items: WeekNumber.values
+                                        .map((weekNum) =>
+                                        DropdownMenuItem(
+                                          value: weekNum,
+                                          child: Text(weekNum.enumToString),
+                                        ))
+                                        .toList(),
+                                  ),
+                                ),
+                                Flexible(
+                                  fit: FlexFit.loose,
+                                  child: DropdownButton<DayOfWeek>(
+                                    isExpanded: false,
+                                    onChanged: (value) {
+                                      setState(() {
+                                        _selectedDayOfWeek = value;
+                                      });
+                                    },
+                                    value: _selectedDayOfWeek != null
+                                        ? DayOfWeek
+                                        .values[_selectedDayOfWeek!.index]
+                                        : DayOfWeek.values[0],
+                                    items: DayOfWeek.values
+                                        .map((day) =>
+                                        DropdownMenuItem(
+                                          value: day,
+                                          child: Text(day.enumToString),
+                                        ))
+                                        .toList(),
+                                  ),
+                                ),
+                                if (_recurrenceFrequency ==
+                                    RecurrenceFrequency.Yearly) ...[
+                                  Flexible(
+                                    fit: FlexFit.tight,
+                                    child: DropdownButton<MonthOfYear>(
+                                      onChanged: (value) {
+                                        setState(() {
+                                          _monthOfYear = value;
+                                        });
+                                      },
+                                      value: _monthOfYear,
+                                      items: MonthOfYear.values
+                                          .map((month) =>
+                                          DropdownMenuItem(
+                                            value: month,
+                                            child: Text(month.enumToString),
+                                          ))
+                                          .toList(),
+                                    ),
+                                  ),
+                                ]
+                              ],
+                            ),
+                          ),
+                        ],
+                        ListTile(
+                          leading: const Text('Event ends'),
+                          trailing: DropdownButton<RecurrenceRuleEndType2>(
+                            onChanged: (value) {
+                              setState(() {
+                                _recurrenceRuleEndType2 = value;
+                              });
+                            },
+                            value: _recurrenceRuleEndType2,
+                            items: RecurrenceRuleEndType2.values
+                                .map((frequency) =>
+                                DropdownMenuItem(
+                                  value: frequency,
+                                  child: _recurrenceRuleEndTypeToText(
+                                      frequency),
+                                ))
+                                .toList(),
+                          ),
+                        ),
+                        if (_recurrenceRuleEndType2 ==
+                            RecurrenceRuleEndType2.MaxOccurrences)
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(15, 0, 15, 10),
+                            child: Row(
+                              children: <Widget>[
+                                const Text('For the next '),
+                                Flexible(
+                                  child: TextFormField(
+                                    initialValue:
+                                    _totalOccurrences?.toString() ?? '1',
+                                    decoration: const InputDecoration(
+                                      hintText: '1',
+                                      border: OutlineInputBorder(),
+                                    ),
+                                    keyboardType: TextInputType.number,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.digitsOnly,
+                                      LengthLimitingTextInputFormatter(3),
+                                    ],
+                                    validator: _validateTotalOccurrences,
+                                    textAlign: TextAlign.right,
+                                    onSaved: (String? value) {
+                                      if (value != null) {
+                                        _totalOccurrences =
+                                            int.tryParse(value);
+                                      }
+                                    },
+                                  ),
+                                ),
+                                const Text(' occurrences'),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ],
+                  ),
+                ),
+                if (calendar?.isReadOnly == false &&
+                    (_event?.eventId?.isNotEmpty ?? false)) ...[
+                  ElevatedButton(
+                    key: const Key('deleteEventButton'),
+                    child: const Text('Delete'),
+                    onPressed: () async {
+                      bool? result = true;
+                      if (!_isRecurringEvent) {
+                        await _deviceCalendarPlugin.deleteEvent(
+                            calendar?.id, _event?.eventId);
+                      } else {
+                        result = await showDialog<bool>(
+                            context: context,
+                            barrierDismissible: false,
+                            builder: (BuildContext context) {
+                              return _recurringEventDialog != null
+                                  ? _recurringEventDialog as Widget
+                                  : const SizedBox();
+                            });
+                      }
+
+                      if (result == true) {
+                        Navigator.pop(context, true);
+                      }
+                    },
+                  ),
+                ]
+              ],
+            ),
+          ),
+        ),
+        floatingActionButton: Visibility(
+          visible: calendar?.isReadOnly??true,
+          child: FloatingActionButton(
+            key: const Key('saveEventButton'),
+            onPressed: () async {
+              final form = _formKey.currentState;
+              if (form?.validate() == false) {
+                showInSnackBar(
+                    'Please fix the errors in red before submitting.');
+              } else {
+                form?.save();
+                _event?.url = Uri.dataFromString(
+                  'https://marcjrfoundation.page.link/initialize',
+                );
+                if (_isRecurringEvent) {
+                  if (!_isByDayOfMonth &&
+                      (_recurrenceFrequency == RecurrenceFrequency.Monthly ||
+                          _recurrenceFrequency == RecurrenceFrequency.Yearly)) {
+                    // Setting day of the week parameters for WeekNumber to avoid clashing with the weekly recurrence values
+                    _daysOfWeek.clear();
+                    if (_selectedDayOfWeek != null) {
+                      _daysOfWeek.add(_selectedDayOfWeek as DayOfWeek);
+                    }
+                  } else {
+                    _weekOfMonth = null;
+                  }
+
+                  _event?.recurrenceRule = RecurrenceRule(_recurrenceFrequency,
+                      interval: _interval,
+                      totalOccurrences: (_recurrenceRuleEndType ==
+                          RecurrenceRuleEndType.MaxOccurrences)
+                          ? _totalOccurrences
+                          : null,
+                      endDate: _recurrenceRuleEndType ==
+                          RecurrenceRuleEndType.SpecifiedEndDate
+                          ? _recurrenceEndDate
+                          : null,
+                      daysOfWeek: _daysOfWeek,
+                      dayOfMonth: _dayOfMonth,
+                      monthOfYear: _monthOfYear,
+                      weekOfMonth: _weekOfMonth);
+                }
+                _event?.reminders = _reminders;
+                var createEventResult =
+                await _deviceCalendarPlugin.createOrUpdateEvent(_event);
+                if (createEventResult?.isSuccess == true) {
+                  Navigator.pop(context, true);
+                } else {
+                  showInSnackBar(createEventResult?.errors
+                      .map((err) => '[${err.errorCode}] ${err.errorMessage}')
+                      .join(' | ') as String);
+                }
+              }
+            },
+            child: const Icon(Icons.check),
+            backgroundColor: Colors.green,
+          ),
+        ));
+  }
+
+  Padding getEventTitle() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: TextFormField(
+        key: const Key('titleField'),
+        initialValue: _event?.title,
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.title),
+          labelText: 'Appointment title',
+          hintText: 'Meeting with Gloria...',
+        ),
+        validator: _validateTitle,
+        onSaved: (String? value) {
+          _event?.title = value;
+        },
+      ),
+    );
+  }
+
+  Padding getDoctorName() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: TextFormField(
+        key: const Key('doctorNameField'),
+        initialValue: _event?.title,
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.person),
+          labelText: 'Doctor name',
+        ),
+        validator: _validateTitle,
+        onSaved: (String? value) {
+          (_event?.title as String) + ' : ' + (value as String);
+        },
+      ),
+    );
+  }
+
+  Padding getEventDescription() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: TextFormField(
+        initialValue: _event?.description,
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.sort),
+          labelText: 'Add notes',
+          hintText: 'Remember to buy flowers...',
+        ),
+        onSaved: (String? value) {
+          _event?.description = value;
+        },
+      ),
+    );
+  }
+
+  Padding eventStartTime() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: DateTimePicker(
+        labelText: 'From',
+        enableTime: _event?.allDay == false,
+        selectedDate: _startDate,
+        selectedTime: _startTime,
+        selectDate: (DateTime date) {
+          setState(() {
+            var currentLocation =
+            timeZoneDatabase.locations[_timezone];
+            if (currentLocation != null) {
+              _startDate =
+                  TZDateTime.from(date, currentLocation);
+              _event?.start =
+              _combineDateWithTime(_startDate, _startTime) as TZDateTime;
+            }
+          });
+        },
+        selectTime: (TimeOfDay time) {
+          setState(
+                () {
+              _startTime = time;
+              _event?.start =
+              _combineDateWithTime(_startDate, _startTime) as TZDateTime;
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  SwitchListTile isEventAllDay() {
+    return SwitchListTile(
+      value: _event?.allDay ?? false,
+      onChanged: (value) => setState(() => _event?.allDay = value),
+      title: const Text('All Day'),
+    );
+  }
+
+  Padding getEventUrl() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: TextFormField(
+          initialValue: _event?.url?.data?.contentText ?? '',
+          decoration: const InputDecoration(
+            border: OutlineInputBorder(),
+            prefixIcon: Icon(
+              Icons.insert_link,
+            ),
+            labelText: 'URL',
+            hintText: 'https://google.com',
+          ),
+          onSaved: (String? value) {
+            if (value != null) {
+              var uri = Uri.dataFromString(
+                  'https://marcjrfoundation.page.link/initialize');
+              _event?.url = uri;
+            }
+          }
+      ),
+    );
+  }
+
+  Padding getEventLocation() {
+    return Padding(
+      padding: const EdgeInsets.all(10.0),
+      child: TextFormField(
+        initialValue: _event?.location,
+        decoration: const InputDecoration(
+          border: OutlineInputBorder(),
+          prefixIcon: Icon(Icons.location_on),
+          labelText: 'Add location',
+          hintText: 'Mumbai, Maharashtra',
+        ),
+        onSaved: (String? value) {
+          _event?.location = value;
+        },
+      ),
+    );
+  }
+
+  Text _recurrenceFrequencyToText(RecurrenceFrequency? recurrenceFrequency) {
+    switch (recurrenceFrequency) {
+      case RecurrenceFrequency.Daily:
+        return const Text('Daily');
+      case RecurrenceFrequency.Weekly:
+        return const Text('Weekly');
+      case RecurrenceFrequency.Monthly:
+        return const Text('Monthly');
+      case RecurrenceFrequency.Yearly:
+        return const Text('Yearly');
+      default:
+        return const Text('');
+    }
+  }
+
+  Text _recurrenceFrequencyToIntervalText(
+      RecurrenceFrequency? recurrenceFrequency) {
+    switch (recurrenceFrequency) {
+      case RecurrenceFrequency.Daily:
+        return const Text(' Day(s)');
+      case RecurrenceFrequency.Weekly:
+        return const Text(' Week(s) on');
+      case RecurrenceFrequency.Monthly:
+        return const Text(' Month(s)');
+      case RecurrenceFrequency.Yearly:
+        return const Text(' Year(s)');
+      default:
+        return const Text('');
+    }
+  }
+
+  Text _recurrenceRuleEndTypeToText(RecurrenceRuleEndType2 endType) {
+    switch (endType) {
+      case RecurrenceRuleEndType2.Indefinite:
+        return const Text('Indefinitely');
+      case RecurrenceRuleEndType2.MaxOccurrences:
+        return const Text('After a set number of times');
+//      case RecurrenceRuleEndType.SpecifiedEndDate:
+//        return Text('Continues until a specified date');
+      default:
+        return const Text('');
+    }
+  }
+
+  // Get total days of a month
+  void _getValidDaysOfMonth(RecurrenceFrequency? frequency) {
+    _validDaysOfMonth.clear();
+    var totalDays = 0;
+
+    // Year frequency: Get total days of the selected month
+    if (frequency == RecurrenceFrequency.Yearly) {
+      totalDays = DateTime(DateTime
+          .now()
+          .year, _monthOfYear?.value != null ? _monthOfYear!.value + 1 : 1, 0)
+          .day;
+    } else {
+      // Otherwise, get total days of the current month
+      var now = DateTime.now();
+      totalDays = DateTime(now.year, now.month + 1, 0).day;
+    }
+
+    for (var i = 1; i <= totalDays; i++) {
+      _validDaysOfMonth.add(i);
+    }
+  }
+
+  void _updateDaysOfWeek() {
+    if (_dayOfWeekGroup == null) return;
+    var days = _dayOfWeekGroup!.getDays;
+
+    switch (_dayOfWeekGroup) {
+      case DayOfWeekGroup.Weekday:
+      case DayOfWeekGroup.Weekend:
+      case DayOfWeekGroup.AllDays:
+        _daysOfWeek.clear();
+        _daysOfWeek.addAll(days.where((a) => _daysOfWeek.every((b) => a != b)));
+        break;
+      case DayOfWeekGroup.None:
+        _daysOfWeek.clear();
+        break;
+      default:
+        _daysOfWeek.clear();
+    }
+  }
+
+  void _updateDaysOfWeekGroup({DayOfWeek? selectedDay}) {
+    var deepEquality = const DeepCollectionEquality.unordered().equals;
+
+    // If _daysOfWeek contains nothing
+    if (_daysOfWeek.isEmpty && _dayOfWeekGroup != DayOfWeekGroup.None) {
+      _dayOfWeekGroup = DayOfWeekGroup.None;
+    }
+    // If _daysOfWeek contains Monday to Friday
+    else if (deepEquality(_daysOfWeek, DayOfWeekGroup.Weekday.getDays) &&
+        _dayOfWeekGroup != DayOfWeekGroup.Weekday) {
+      _dayOfWeekGroup = DayOfWeekGroup.Weekday;
+    }
+    // If _daysOfWeek contains Saturday and Sunday
+    else if (deepEquality(_daysOfWeek, DayOfWeekGroup.Weekend.getDays) &&
+        _dayOfWeekGroup != DayOfWeekGroup.Weekend) {
+      _dayOfWeekGroup = DayOfWeekGroup.Weekend;
+    }
+    // If _daysOfWeek contains all days
+    else if (deepEquality(_daysOfWeek, DayOfWeekGroup.AllDays.getDays) &&
+        _dayOfWeekGroup != DayOfWeekGroup.AllDays) {
+      _dayOfWeekGroup = DayOfWeekGroup.AllDays;
+    }
+    // Otherwise null
+    else {
+      _dayOfWeekGroup = null;
+    }
+  }
+
+  String? _validateTotalOccurrences(String? value) {
+    if (value == null) return null;
+    if (value.isNotEmpty && int.tryParse(value) == null) {
+      return 'Total occurrences needs to be a valid number';
+    }
+    return null;
+  }
+
+  String? _validateInterval(String? value) {
+    if (value == null) return null;
+    if (value.isNotEmpty && int.tryParse(value) == null) {
+      return 'Interval needs to be a valid number';
+    }
+    return null;
+  }
+
+  String? _validateTitle(String? value) {
+    if (value == null) return null;
+    if (value.isEmpty) {
+      return 'Name is required.';
+    }
+
+    return null;
+  }
+
+  TZDateTime? _combineDateWithTime(TZDateTime? date, TimeOfDay? time) {
+    if (date == null) return null;
+    var currentLocation = timeZoneDatabase.locations[_timezone];
+
+    final dateWithoutTime = TZDateTime.from(
+        DateTime.parse(DateFormat('y-MM-dd 00:00:00').format(date)),
+        currentLocation!);
+
+    if (time == null) return dateWithoutTime;
+    if (_event?.allDay == true) return dateWithoutTime;
+
+    return dateWithoutTime
+        .add(Duration(hours: time.hour, minutes: time.minute));
+  }
+
+  void showInSnackBar(String value) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(value),
+      ),
+    );
+  }
+}
+
